@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>US weather model comparison</title>
+<style>
+  :root {
+    --bg: #f1f4f3; --panel: #ffffff; --ink: #1b2a32; --muted: #5b6b73; --line: #d6dde0; --accent: #1b6ca8;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f191e; --panel: #16242b; --ink: #e3ebee; --muted: #93a4ad; --line: #2a3b44; --accent: #6db3e8; color-scheme: dark; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 "Avenir Next", "Segoe UI", system-ui, sans-serif; }
+  main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+  h2 { font-size: 1.05rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 14px; }
+  select, button { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 7px 12px; }
+  button { cursor: pointer; }
+  button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+  select:focus-visible, button:focus-visible, tr:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin-bottom: 20px; }
+  .chart-wrap { position: relative; height: 360px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: var(--bg); }
+  .note { color: var(--muted); font-size: 0.88rem; margin: 0 0 10px; }
+  footer { color: var(--muted); font-size: 0.85rem; }
+  footer a { color: var(--accent); }
+  #err { color: #b3261e; }
+</style>
+</head>
+<body>
+<main>
+  <h1>How much do the weather models disagree?</h1>
+  <p class="sub" id="updated">Loading forecasts…</p>
+  <p id="err" role="alert"></p>
+
+  <div class="controls">
+    <label>City <select id="city"></select></label>
+    <div id="vars" role="group" aria-label="Variable"></div>
+  </div>
+
+  <section class="panel">
+    <h2 id="chart-title"></h2>
+    <div class="chart-wrap"><canvas id="chart" role="img" aria-label="Model forecast comparison chart"></canvas></div>
+  </section>
+
+  <section class="panel">
+    <h2>Where the models differ most</h2>
+    <p class="note" id="spread-note"></p>
+    <table>
+      <thead><tr><th>City</th><th class="num" id="spread-head"></th></tr></thead>
+      <tbody id="spread"></tbody>
+    </table>
+  </section>
+
+  <footer>
+    Weather data by <a href="https://open-meteo.com/">Open-Meteo.com</a> (CC BY 4.0). Times shown in your local time zone.
+  </footer>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<script>
+const VARS = {
+  temperature_2m: { label: "Temperature", unit: "°F", cum: false },
+  wind_speed_10m: { label: "Wind", unit: "mph", cum: false },
+  wind_gusts_10m: { label: "Gusts", unit: "mph", cum: false },
+  precipitation:  { label: "Precipitation", unit: "in", cum: true },
+  snowfall:       { label: "Snowfall", unit: "in", cum: true },
+};
+const MODEL_INFO = {
+  gfs_seamless:  { name: "GFS (NOAA)",    color: "#1b6ca8" },
+  ecmwf_ifs025:  { name: "ECMWF IFS",     color: "#d1495b" },
+  icon_seamless: { name: "ICON (DWD)",    color: "#2a9d8f" },
+  gem_seamless:  { name: "GEM (Canada)",  color: "#d99a1f" },
+};
+const WINDOW = 72; // hours used for the disagreement ranking
+let DATA, chart;
+const state = { city: 0, v: "temperature_2m" };
+const $ = (id) => document.getElementById(id);
+
+function series(loc, v, m) {
+  const arr = loc.data[v][m];
+  if (!arr) return null;
+  if (!VARS[v].cum) return arr;
+  let run = 0;
+  return arr.map((x) => (run += x || 0));
+}
+
+function spread(loc, v) {
+  const arrs = DATA.models.map((m) => loc.data[v][m]).filter(Boolean);
+  if (arrs.length < 2) return null;
+  if (VARS[v].cum) {
+    const totals = arrs.map((a) => a.slice(0, WINDOW).reduce((s, x) => s + (x || 0), 0));
+    return Math.max(...totals) - Math.min(...totals);
+  }
+  let sum = 0, n = 0;
+  for (let i = 0; i < WINDOW; i++) {
+    const vals = arrs.map((a) => a[i]).filter((x) => x != null);
+    if (vals.length > 1) { sum += Math.max(...vals) - Math.min(...vals); n++; }
+  }
+  return n ? sum / n : null;
+}
+
+function renderChart() {
+  const loc = DATA.locations[state.city];
+  const meta = VARS[state.v];
+  const css = getComputedStyle(document.documentElement);
+  const ink = css.getPropertyValue("--muted").trim(), grid = css.getPropertyValue("--line").trim();
+  const labels = loc.time.map((t) =>
+    new Date(t + "Z").toLocaleString([], { weekday: "short", hour: "numeric" }));
+  const datasets = DATA.models.map((m) => ({
+    label: MODEL_INFO[m]?.name || m,
+    data: series(loc, state.v, m) || [],
+    borderColor: MODEL_INFO[m]?.color, backgroundColor: MODEL_INFO[m]?.color,
+    borderWidth: 2, pointRadius: 0, tension: 0.2,
+  }));
+  $("chart-title").textContent = `${loc.name}: ${meta.cum ? "cumulative " : ""}${meta.label.toLowerCase()} (${meta.unit})`;
+  if (chart) chart.destroy();
+  chart = new Chart($("chart"), {
+    type: "line",
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, interaction: { mode: "index", intersect: false },
+      scales: {
+        x: { ticks: { color: ink, maxTicksLimit: 8, maxRotation: 0 }, grid: { color: grid } },
+        y: { ticks: { color: ink }, grid: { color: grid }, title: { display: true, text: meta.unit, color: ink } },
+      },
+      plugins: { legend: { labels: { color: ink } } },
+    },
+  });
+}
+
+function renderTable() {
+  const meta = VARS[state.v];
+  $("spread-head").textContent = meta.cum ? `Gap in ${WINDOW}-h total (${meta.unit})` : `Avg gap (${meta.unit})`;
+  $("spread-note").textContent = meta.cum
+    ? `Difference between the wettest and driest model's total over the next ${WINDOW} hours. Click a row to chart it.`
+    : `Average hourly difference between the highest and lowest model over the next ${WINDOW} hours. Click a row to chart it.`;
+  const rows = DATA.locations
+    .map((loc, i) => ({ i, name: loc.name, s: spread(loc, state.v) }))
+    .filter((r) => r.s != null)
+    .sort((a, b) => b.s - a.s)
+    .slice(0, 12);
+  $("spread").innerHTML = "";
+  rows.forEach((r) => {
+    const tr = document.createElement("tr");
+    tr.tabIndex = 0;
+    tr.innerHTML = `<td>${r.name}</td><td class="num">${r.s.toFixed(meta.cum ? 2 : 1)}</td>`;
+    const pick = () => { state.city = r.i; $("city").value = r.i; renderChart(); window.scrollTo({ top: 0, behavior: "smooth" }); };
+    tr.addEventListener("click", pick);
+    tr.addEventListener("keydown", (e) => { if (e.key === "Enter") pick(); });
+    $("spread").appendChild(tr);
+  });
+}
+
+function renderAll() { renderChart(); renderTable(); }
+
+async function init() {
+  try {
+    const res = await fetch("data/forecast.json", { cache: "no-cache" });
+    if (!res.ok) throw new Error(res.status);
+    DATA = await res.json();
+  } catch (e) {
+    $("updated").textContent = "";
+    $("err").textContent = "Couldn't load data/forecast.json. Run fetch_data.py first, and open the page through a web server (python -m http.server) rather than as a file.";
+    return;
+  }
+  $("updated").textContent = "Model data last refreshed " + new Date(DATA.generated).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  DATA.locations.forEach((loc, i) => $("city").add(new Option(loc.name, i)));
+  $("city").addEventListener("change", (e) => { state.city = +e.target.value; renderChart(); });
+  Object.entries(VARS).forEach(([key, meta]) => {
+    const b = document.createElement("button");
+    b.textContent = meta.label;
+    b.setAttribute("aria-pressed", key === state.v);
+    b.addEventListener("click", () => {
+      state.v = key;
+      document.querySelectorAll("#vars button").forEach((x) => x.setAttribute("aria-pressed", x === b));
+      renderAll();
+    });
+    $("vars").appendChild(b);
+  });
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", renderChart);
+  renderAll();
+}
+init();
+</script>
+</body>
+</html>
