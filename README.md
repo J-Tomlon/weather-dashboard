@@ -2,7 +2,7 @@
 Dashboard comparing outputs of weather models. The dashboard shows how much the models disagree. It doesn't measure which one is right, because it has no observations to compare against.
 
 ## What are Weather Models?
-Weather models are computer simulations that use mathematical equations based on physics to predict future weather conditions from current atmospheric observations given a set of starting parameters and training data. 
+Weather models are computer simulations that use mathematical equations based on physics to predict future weather conditions from current atmospheric observations and training data. These model divide up geopraphic area into a grid which can vary in size depending on the model. A more finite grid can lead to greater detail in the forecast but will take more computing power.   
 
 ### GFS (NOAA, USA)
 This is the American global model, about 13 km resolution, run 4 times a day out to 16 days. In the gfs_seamless option, Open-Meteo blends in the high-resolution HRRR model over the US for the first day or so. GFS has traditionally been too progressive, meaning it moves storm systems along too fast, and it tends to eject slow, cut-off lows too quickly. It's also prone to producing too much light precipitation. Its skill is a step behind ECMWF in the medium range.
